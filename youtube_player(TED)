@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YouTube Signage Player</title>
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+}
+#player {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+</style>
+</head>
+<body>
+
+<div id="player"></div>
+
+<script src="https://www.youtube.com/iframe_api"></script>
+<script>
+const VIDEO_ID = "qDTMeR4n2b8";
+
+/*
+  여기 값은 나중에 GitHub Pages 주소에 맞게 바꿉니다.
+  지금은 임시값으로 둡니다.
+*/
+const PAGE_ORIGIN = "https://USERNAME.github.io";
+
+let player;
+
+function onYouTubeIframeAPIReady() {
+    player = new YT.Player("player", {
+        videoId: VIDEO_ID,
+        playerVars: {
+            autoplay: 1,
+            controls: 0,
+            rel: 0,
+            modestbranding: 1,
+            loop: 1,
+            playlist: VIDEO_ID,
+            playsinline: 1,
+            origin: PAGE_ORIGIN
+        },
+        events: {
+            onReady: onPlayerReady,
+            onStateChange: onPlayerStateChange,
+            onError: onPlayerError
+        }
+    });
+}
+
+function onPlayerReady(event) {
+    event.target.mute();
+    event.target.playVideo();
+}
+
+function onPlayerStateChange(event) {
+    if (event.data === YT.PlayerState.ENDED) {
+        event.target.playVideo();
+    }
+}
+
+function onPlayerError(event) {
+    console.log("YouTube error code:", event.data);
+    setTimeout(() => {
+        if (player) player.loadVideoById(VIDEO_ID);
+    }, 5000);
+}
+</script>
+
+</body>
+</html>
