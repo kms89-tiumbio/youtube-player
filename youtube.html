@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouTube Signage Player for MagicInfo</title>
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+    }
+
+    #player-wrap {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      background: #000;
+    }
+
+    #player, iframe {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      pointer-events: none;
+    }
+
+    #status {
+      position: fixed;
+      left: 12px;
+      bottom: 12px;
+      z-index: 9999;
+      color: rgba(255,255,255,0.5);
+      font-size: 12px;
+      font-family: Arial, sans-serif;
+      background: rgba(0,0,0,0.35);
+      padding: 6px 8px;
+      border-radius: 6px;
+      user-select: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="player-wrap">
+    <div id="player"></div>
+  </div>
+  <div id="status">initializing...</div>
+
+  <script>
+    /************************************************************
+     * 설정값
+     ************************************************************/
+    const VIDEO_ID = "qDTMeR4n2b8"; // 여기만 원하는 유튜브 영상 ID로 변경
+    const ORIGIN_URL = "https://kms89-tiumbio.github.io";
+
+    // 재생 감시 설정
+    const WATCHDOG_INTERVAL_MS = 5000;       // 상태 점검 주기
+    const MAX_NOT_PLAYING_MS = 25000;        // 이 시간 이상 PLAYING 아니면 복구 시도
+    const MAX_SAME_STATE_MS = 30000;         // 동일 상태 장기 지속 시 복구 시도
+    const PLAYER_REBUILD_LIMIT = 3;          // 연속 실패 시 iframe 재생성 기준
+
+    /************************************************************
+     * 내부 변수
+     ************************************************************/
+    let player = null;
+    let currentState = -999;
+    let lastStateChangeAt = Date.now();
+    let lastPlayingAt = 0;
+    let lastRecoveryAt = 0;
+    let recoveryCount = 0;
+    let buildCount = 0;
+    let watchdogTimer = null;
+    let apiReady = false;
+
+    const statusEl = document.getElementById("status");
+
+    function logStatus(msg) {
+      const now = new Date();
+      const hh = String(now.getHours()).padStart(2, "0");
+      const mm = String(now.getMinutes()).padStart(2, "0");
+      const ss = String(now.getSeconds()).padStart(2, "0");
+      statusEl.textContent = `[${hh}:${mm}:${ss}] ${msg}`;
+      console.log(msg);
+    }
+
+    function stateToText(state) {
+      switch (state) {
+        case -1: return "UNSTARTED";
+        case 0: return "ENDED";
+        case 1: return "PLAYING";
+        case 2: return "PAUSED";
+        case 3: return "BUFFERING";
+        case 5: return "CUED";
+        default: return `UNKNOWN(${state})`;
+      }
+    }
+
+    function safeCall(fn) {
+      try {
+        fn();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function nowMs() {
+      return Date.now();
+    }
+
+    function markState(state) {
+      currentState = state;
+      lastStateChangeAt = nowMs();
+
+      if (state === 1) {
+        lastPlayingAt = nowMs();
+        recoveryCount = 0;
+      }
+
+      logStatus(`state=${stateToText(state)}`);
+    }
+
+    function forcePlay(reason) {
+      const current = nowMs();
+
+      if (current - lastRecoveryAt < 4000) {
+        logStatus(`skip recovery (cooldown): ${reason}`);
+        return;
+      }
+
+      lastRecoveryAt = current;
+      recoveryCount += 1;
+
+      logStatus(`recovery #${recoveryCount}: ${reason}`);
+
+      safeCall(() => {
+        if (!player) return;
+        player.mute();
+      });
+
+      safeCall(() => {
+        if (!player) return;
+        player.playVideo();
+      });
+
+      // playVideo로 안 살아나면 다시 로드
+      setTimeout(() => {
+        if (!player) return;
+        if (currentState !== 1) {
+          safeCall(() => {
+            player.loadVideoById({
+              videoId: VIDEO_ID,
+              startSeconds: 0,
+              suggestedQuality: "large"
+            });
+          });
+          logStatus(`loadVideoById(): ${reason}`);
+        }
+      }, 2500);
+
+      // 계속 실패하면 플레이어 재생성
+      if (recoveryCount >= PLAYER_REBUILD_LIMIT) {
+        setTimeout(() => {
+          rebuildPlayer(`too many recoveries: ${reason}`);
+        }, 5000);
+      }
+    }
+
+    function startWatchdog() {
+      if (watchdogTimer) clearInterval(watchdogTimer);
+
+      watchdogTimer = setInterval(() => {
+        const current = nowMs();
+        const notPlayingFor = lastPlayingAt ? (current - lastPlayingAt) : Number.MAX_SAFE_INTEGER;
+        const sameStateFor = current - lastStateChangeAt;
+
+        // PLAYING이 너무 오래 안 잡힐 때
+        if (currentState !== 1 && notPlayingFor > MAX_NOT_PLAYING_MS) {
+          forcePlay(`not playing for ${Math.floor(notPlayingFor / 1000)}s`);
+          return;
+        }
+
+        // ENDED/CUED/UNSTARTED/PAUSED가 오래 지속될 때
+        if ([0, 2, 5, -1].includes(currentState) && sameStateFor > MAX_SAME_STATE_MS) {
+          forcePlay(`stuck in ${stateToText(currentState)} for ${Math.floor(sameStateFor / 1000)}s`);
+          return;
+        }
+
+        // BUFFERING이 너무 길 때
+        if (currentState === 3 && sameStateFor > 20000) {
+          forcePlay(`buffering too long (${Math.floor(sameStateFor / 1000)}s)`);
+        }
+      }, WATCHDOG_INTERVAL_MS);
+    }
+
+    function destroyPlayer() {
+      safeCall(() => {
+        if (player && typeof player.destroy === "function") {
+          player.destroy();
+        }
+      });
+      player = null;
+
+      const holder = document.getElementById("player");
+      holder.innerHTML = "";
+    }
+
+    function createPlayer() {
+      buildCount += 1;
+      logStatus(`createPlayer() #${buildCount}`);
+
+      player = new YT.Player("player", {
+        width: "100%",
+        height: "100%",
+        videoId: VIDEO_ID,
+        playerVars: {
+          autoplay: 1,
+          controls: 0,
+          disablekb: 1,
+          fs: 0,
+          modestbranding: 1,
+          playsinline: 1,
+          rel: 0,
+          iv_load_policy: 3,
+          cc_load_policy: 0,
+          mute: 1,
+          loop: 1,
+          playlist: VIDEO_ID,
+          enablejsapi: 1,
+          origin: ORIGIN_URL
+        },
+        events: {
+          onReady: onPlayerReady,
+          onStateChange: onPlayerStateChange,
+          onError: onPlayerError,
+          onAutoplayBlocked: onAutoplayBlocked
+        }
+      });
+    }
+
+    function rebuildPlayer(reason) {
+      logStatus(`rebuildPlayer(): ${reason}`);
+      recoveryCount = 0;
+      destroyPlayer();
+
+      setTimeout(() => {
+        createPlayer();
+      }, 1500);
+    }
+
+    function onPlayerReady(event) {
+      logStatus("player ready");
+
+      safeCall(() => event.target.mute());
+      safeCall(() => event.target.playVideo());
+
+      // 일부 환경에서 ready 직후 1회 더 호출이 안정적
+      setTimeout(() => {
+        safeCall(() => event.target.mute());
+        safeCall(() => event.target.playVideo());
+      }, 1500);
+
+      startWatchdog();
+    }
+
+    function onPlayerStateChange(event) {
+      markState(event.data);
+
+      // 광고 뒤 본편 전환 실패나 종료 상태 복구용
+      if (event.data === YT.PlayerState.ENDED) {
+        setTimeout(() => {
+          forcePlay("video ended");
+        }, 1000);
+      }
+
+      if (event.data === YT.PlayerState.CUED) {
+        setTimeout(() => {
+          forcePlay("video cued");
+        }, 1000);
+      }
+
+      if (event.data === YT.PlayerState.UNSTARTED) {
+        setTimeout(() => {
+          if (currentState !== 1) {
+            forcePlay("still unstarted");
+          }
+        }, 4000);
+      }
+
+      if (event.data === YT.PlayerState.PAUSED) {
+        setTimeout(() => {
+          if (currentState === YT.PlayerState.PAUSED) {
+            forcePlay("unexpected pause");
+          }
+        }, 4000);
+      }
+    }
+
+    function onPlayerError(event) {
+      logStatus(`player error: ${event.data}`);
+
+      // 150, 101 등 임베드 제한인 경우는 코드로 해결 불가
+      // 그 외에는 복구 시도
+      if (event.data === 101 || event.data === 150) {
+        logStatus("embedding restricted by YouTube");
+        return;
+      }
+
+      setTimeout(() => {
+        rebuildPlayer(`error code ${event.data}`);
+      }, 3000);
+    }
+
+    function onAutoplayBlocked() {
+      logStatus("autoplay blocked");
+      setTimeout(() => {
+        forcePlay("autoplay blocked");
+      }, 1000);
+    }
+
+    function loadYouTubeAPI() {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      tag.async = true;
+      document.head.appendChild(tag);
+    }
+
+    window.onYouTubeIframeAPIReady = function () {
+      apiReady = true;
+      logStatus("YouTube API ready");
+      createPlayer();
+    };
+
+    // visibility 변화 대응
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        logStatus("visibilitychange: visible");
+        setTimeout(() => {
+          if (player) forcePlay("page visible again");
+        }, 1000);
+      } else {
+        logStatus("visibilitychange: hidden");
+      }
+    });
+
+    // 포커스 복귀 대응
+    window.addEventListener("focus", () => {
+      logStatus("window focus");
+      setTimeout(() => {
+        if (player) forcePlay("window focus");
+      }, 1000);
+    });
+
+    // 네트워크 복귀 대응
+    window.addEventListener("online", () => {
+      logStatus("network online");
+      setTimeout(() => {
+        if (player) rebuildPlayer("network online");
+      }, 2000);
+    });
+
+    window.addEventListener("load", () => {
+      logStatus("page loaded");
+      loadYouTubeAPI();
+
+      // API 로딩 이상 시 대비
+      setTimeout(() => {
+        if (!apiReady) {
+          logStatus("API not ready, retrying script load");
+          loadYouTubeAPI();
+        }
+      }, 8000);
+    });
+  </script>
+</body>
+</html>
