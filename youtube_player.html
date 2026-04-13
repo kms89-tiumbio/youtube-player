@@ -29,14 +29,41 @@ html, body {
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
 const VIDEO_ID = "GT1Goh_wSxA";
+const PAGE_ORIGIN = "https://kms89-tiumbio.github.io";
 
 /*
-  여기 값은 나중에 GitHub Pages 주소에 맞게 바꿉니다.
-  지금은 임시값으로 둡니다.
+  설정값
 */
-const PAGE_ORIGIN = "https://USERNAME.github.io";
+const PERIODIC_RELOAD_MS = 30 * 60 * 1000;   // 30분마다 강제 재로드
+const STUCK_CHECK_MS = 15 * 1000;            // 15초 이상 멈춘 상태면 재로드
+const ERROR_RETRY_MS = 5 * 1000;             // 오류 시 5초 후 재시도
 
-let player;
+let player = null;
+let lastStateChangeTime = Date.now();
+let reloadLock = false;
+
+function log(msg) {
+    console.log("[YouTube Player] " + msg);
+}
+
+function safeReloadVideo(reason) {
+    if (!player || reloadLock) {
+        return;
+    }
+
+    reloadLock = true;
+    log("Reload video: " + reason);
+
+    try {
+        player.loadVideoById(VIDEO_ID);
+    } catch (e) {
+        log("Reload failed: " + e.message);
+    }
+
+    setTimeout(function () {
+        reloadLock = false;
+    }, 3000);
+}
 
 function onYouTubeIframeAPIReady() {
     player = new YT.Player("player", {
@@ -46,8 +73,6 @@ function onYouTubeIframeAPIReady() {
             controls: 0,
             rel: 0,
             modestbranding: 1,
-            loop: 1,
-            playlist: VIDEO_ID,
             playsinline: 1,
             origin: PAGE_ORIGIN
         },
@@ -60,22 +85,84 @@ function onYouTubeIframeAPIReady() {
 }
 
 function onPlayerReady(event) {
+    log("Player ready");
     event.target.mute();
     event.target.playVideo();
+    lastStateChangeTime = Date.now();
 }
 
 function onPlayerStateChange(event) {
-    if (event.data === YT.PlayerState.ENDED) {
-        event.target.playVideo();
+    lastStateChangeTime = Date.now();
+
+    switch (event.data) {
+        case YT.PlayerState.UNSTARTED:
+            log("State: UNSTARTED");
+            break;
+        case YT.PlayerState.ENDED:
+            log("State: ENDED");
+            safeReloadVideo("video ended");
+            break;
+        case YT.PlayerState.PLAYING:
+            log("State: PLAYING");
+            break;
+        case YT.PlayerState.PAUSED:
+            log("State: PAUSED");
+            break;
+        case YT.PlayerState.BUFFERING:
+            log("State: BUFFERING");
+            break;
+        case YT.PlayerState.CUED:
+            log("State: CUED");
+            break;
+        default:
+            log("State: UNKNOWN (" + event.data + ")");
+            break;
     }
 }
 
 function onPlayerError(event) {
-    console.log("YouTube error code:", event.data);
-    setTimeout(() => {
-        if (player) player.loadVideoById(VIDEO_ID);
-    }, 5000);
+    log("YouTube error code: " + event.data);
+    setTimeout(function () {
+        safeReloadVideo("player error " + event.data);
+    }, ERROR_RETRY_MS);
 }
+
+/*
+  30분마다 강제 재로드
+*/
+setInterval(function () {
+    safeReloadVideo("periodic reload");
+}, PERIODIC_RELOAD_MS);
+
+/*
+  버퍼링/정지/시작실패 상태가 너무 오래가면 재로드
+*/
+setInterval(function () {
+    if (!player) {
+        return;
+    }
+
+    let currentState = -999;
+
+    try {
+        currentState = player.getPlayerState();
+    } catch (e) {
+        log("Failed to get player state: " + e.message);
+        return;
+    }
+
+    const elapsed = Date.now() - lastStateChangeTime;
+
+    if (
+        (currentState === YT.PlayerState.UNSTARTED ||
+         currentState === YT.PlayerState.BUFFERING ||
+         currentState === YT.PlayerState.PAUSED ||
+         currentState === YT.PlayerState.CUED) &&
+        elapsed > STUCK_CHECK_MS
+    ) {
+        safeReloadVideo("stuck state for " + elapsed + "ms");
+    }
+}, 5000);
 </script>
 
 </body>
